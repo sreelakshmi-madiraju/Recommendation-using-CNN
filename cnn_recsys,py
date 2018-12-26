@@ -1,0 +1,107 @@
+import tensorflow as tf
+from gensim.models import Word2Vec
+from gensim.models import KeyedVectors
+import json
+import pandas as pd
+from pickle import load
+from numpy import array
+from keras.preprocessing.text import Tokenizer
+from keras.preprocessing.sequence import pad_sequences
+from keras.utils.vis_utils import plot_model
+from keras.models import Model
+from keras.layers import Input
+from keras.layers import Dense
+from keras.layers import Flatten
+from keras.layers import Dropout
+from keras.layers import Embedding
+from keras.layers.convolutional import Conv1D
+from keras.layers.convolutional import MaxPooling1D
+from keras.layers.merge import concatenate
+from nltk import word_tokenize
+from nltk.corpus import stopwords
+import re
+import numpy as np
+// Read data
+df=pd.read_csv('./beauty_df.csv',header='infer')
+df=df[['reviewerID', 'asin','reviewText','overall','reviewTime']]
+df = df[:5000]
+df["reviewText"] = df["reviewText"].astype('str') 
+
+#clean data
+
+stop = set(stopwords.words('english'))
+df["reviewText"] = df["reviewText"].map(lambda x: re.sub('[^a-zA-Z ]+', '', x))
+df["reviewText"] = df["reviewText"].map(lambda sentence: [i for i in sentence.lower().split() if i not in stop and i!=''])
+
+user_text = df.groupby("reviewerID")['reviewText'].apply(sum)
+item_text = df.groupby("asin")['reviewText'].apply(sum)
+# Create a embedding of words, treating all the reviews of user and items as diffrent documents.
+model1 = Word2Vec(user_text.values, size=100, window=5, min_count=1, workers=4)
+model2 = Word2Vec(item_text.values, size=100, window=5, min_count=1, workers=4)
+# Embedding lookup
+user_input = user_text.map(lambda x: [model1[i] for i in x])
+item_input = item_text.map(lambda x: [model2[i] for i in x])
+df_min = df[['reviewerID', 'asin', 'overall']]
+def one_hot(rate):
+    seq_one_hot=np.zeros(5)
+    seq_one_hot[int(rate)-1] = 1
+    return seq_one_hot
+
+df["rate"] = df["overall"].map(one_hot)
+
+## Add padding to user and item input vectors
+
+user_list = df["reviewerID"].values
+item_list = df["asin"].values
+
+train_user = np.zeros((5000,200,100))
+train_item = np.zeros((5000,200,100))
+
+for idx, user in enumerate(user_list):
+    for idy, user_embeddings in enumerate(user_input[user]):
+        if idy>=200:
+            continue
+        train_user[idx][idy] = user_embeddings
+
+for idx, item in enumerate(item_list):
+    for idy, item_embeddings in enumerate(item_input[item]):
+        if idy>=200:
+            continue
+        train_item[idx][idy] = item_embeddings
+        
+train_labels = df["rate"].values.tolist()
+
+#CNN - Recommendation
+def define_model():
+    #channel 1
+    inputs1 = Input(shape=(200,100))
+    conv1 = Conv1D(filters=32, kernel_size=5, activation='relu')(inputs1)
+    drop1 = Dropout(0.5)(conv1)
+    pool1 = MaxPooling1D(pool_size=2)(drop1)
+    flat1 = Flatten()(pool1)
+    # channel 2
+    inputs2 = Input(shape=(200,100))
+    conv2 = Conv1D(filters=32, kernel_size=5, activation='relu')(inputs2)
+    drop2 = Dropout(0.5)(conv2)
+    pool2 = MaxPooling1D(pool_size=2)(drop2)
+    flat2 = Flatten()(pool2)
+
+    # merge
+    merged = concatenate([flat1, flat2])
+    # interpretation
+    dense1 = Dense(10, activation='relu')(merged)
+    outputs = Dense(5, activation='softmax')(dense1)
+    model = Model(inputs=[inputs1, inputs2], outputs=outputs)
+    # compile
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    # summarize
+    print(model.summary())
+    plot_model(model, to_file='CNN_based_Recsys.png')
+    
+    return model
+    # define model
+model = define_model()
+# fit model
+model.fit([train_user,train_item], np.array(train_labels), epochs=1, batch_size=1)
+# save the model
+model.save('model.h5')
